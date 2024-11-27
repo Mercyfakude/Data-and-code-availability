@@ -20,4 +20,4 @@ Each excel sheet contains 3 columnsas follows:
 Additional datasets:
 1.Excel sheet containg haploid male fertility (HMF) and haploid female fertility (HFF) named HFF_HMF_female fertility and male fertility
 
-Genotypic data file named: filtered_genotype_data1
+Genotypic data file named: filtered_genotype_data1_Genotypic_data

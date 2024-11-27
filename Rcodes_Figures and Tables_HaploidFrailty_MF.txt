@@ -1,0 +1,630 @@
+
+#################################################Figure 2: Boxplots (Diploid, Haploid, and Haploid Fraility)on each trait######################################################
+
+# Load necessary libraries
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(gridExtra)
+
+# Set working directory to the folder with your CSV files
+setwd("C:/Users/mfakude/OneDrive - Iowa State University/Desktop/HIST_CORR/TRAITS-Averaged_Latest")
+
+# List of CSV files to load
+files <- c("PH.csv", "EH.csv", "SD.csv", "FLL.csv", "FLW.csv", "TL.csv", "SL.csv", "TB.csv")
+
+# Load and prepare data from all files
+data_combined <- lapply(files, function(file) {
+  data <- read.csv(file)
+  data_long <- melt(data, id.vars = "PI", variable.name = "Group", value.name = "Value")
+  data_long$Trait <- tools::file_path_sans_ext(file)  # Add trait name based on file name
+  # Scale Haploid_frailty values for clearer visualization
+  data_long$Value_scaled <- ifelse(data_long$Group == "Haploid_frailty", data_long$Value * 100, data_long$Value)
+  data_long
+}) %>% bind_rows()  # Combine all data frames into one
+
+# Ensure that "Group" has the correct order and rename levels
+data_combined$Group <- factor(data_combined$Group, levels = c("Diploid", "Haploid", "Haploid_frailty"))
+levels(data_combined$Group) <- c("D", "H", "HF")
+
+# Order the facets in the specific sequence
+data_combined$Trait <- factor(data_combined$Trait, levels = c("PH", "EH", "SD", "FLL", "FLW", "TL", "SL", "TB"))
+
+# Plot with free y-axis scales per facet
+ggplot(data_combined, aes(x = Group, y = Value_scaled, fill = Group)) +
+  geom_boxplot(outlier.shape = 16, outlier.size = 1.5) +
+  facet_wrap(~ Trait, scales = "free_y", nrow = 2) +  # Allow each trait to have its own y-scale
+  theme_gray() +  # Set grey background theme
+  labs(x = "Group", y = "Trait Value", title = "Boxplots of Agronomic Traits by Ploidy Level") +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    panel.border = element_rect(colour = "black", fill = NA, size = 0.5)
+  ) +
+  guides(fill = guide_legend(title = "Group"))
+
+#####################################################Figure 3: Correlation between haploid male fertility,female fertiliy and haploid fraily#########################
+library(tidyverse)
+library(emmeans)
+library(lme4)
+
+source("01_Scripts/AG_phenotype_functions.R")
+
+#Data----
+### input data 
+AG_traits_path_tbl <- fs::dir_info("00_Data/Mercy_data/HIST_CORR")
+##
+AG_traits_info_tbl <- AG_traits_path_tbl %>% 
+  dplyr::select(path) %>%
+  filter(path %>% str_detect("DHHF")) %>% 
+  mutate(Traits = path %>% str_extract("(?<=CORR/).*?(?=_)")) %>% 
+  relocate(Traits) 
+  
+##
+AG_traits_data_tbl <- AG_traits_info_tbl%>% 
+  # Read data
+  mutate(AG_rawdata = path %>% map(read.csv)) %>% 
+  mutate(AG_avereage_tbl = AG_rawdata %>% map(Avergor)) %>%
+  mutate(AG_pivot_tbl = AG_rawdata %>% map(pivot_trait_longer)) 
+
+AG_traits_data_tbl$AG_rawdata[[8]] %>% glimpse()
+AG_traits_data_tbl$AG_avereage_tbl[[8]] %>% glimpse()
+AG_traits_data_tbl$AG_pivot_tbl[[8]] %>% glimpse()
+
+fit <- lm(Value ~PI + Plant + PI:Plant, data = AG_traits_data_tbl$AG_pivot_tbl[[8]])
+anova(fit)
+
+Tratis_average_tbl <- AG_traits_data_tbl %>% 
+  select(Traits, AG_avereage_tbl) %>%
+  unnest(AG_avereage_tbl) 
+
+Tratis_average_wider_tbl <- Tratis_average_tbl%>%
+  pivot_wider(
+    names_from = Traits,
+    values_from = c(Diploid, Haploid, Haploid_frailty)
+  ) %>% 
+  drop_na()%>%
+  glimpse()
+
+## add HMF and HFF data
+HMF_tbl <- read.csv("00_Data/Mercy_data/HIST_CORR-selected/HF_HMF_HFF.csv")
+
+HMFF_tbl <- HMF_tbl %>% 
+  select(PI, HMF, HFF) %>% 
+  glimpse()
+
+Traits_tbl <- Tratis_average_wider_tbl %>%
+  left_join(HMFF_tbl, by = c("PI")) %>% 
+  relocate(HMF, HFF, .after = "PI") %>%
+  drop_na() %>%
+  # select the columns that do not contain "SD"
+  select(!(contains("SD")))%>%
+  select(!any_of(c("Haploid_frailty_FLL", "Haploid_frailty_FLW", "Haploid_frailty_TB"))) %>% 
+  glimpse()
+
+## correlation matrix plot
+Traits_Cor_tbl<- Traits_tbl %>% 
+  select(-PI) %>% 
+  cor() 
+Traits_Cor_tbl %>% 
+  corrplot::corrplot(type = 'lower',diag = FALSE) #%>% 
+
+## Save the correlation matrix plot
+#ggsave("02_Figures/Cor_plot.png", Cor_plot, width = 10, height = 10)
+
+
+#####################################################Figure 4. Genomic Prediction#########################################################################
+library(tidyverse)
+library(emmeans)
+source("01_Scripts/AG_phenotype_functions.R")
+source("01_Scripts/CV_functions(multi_Y).R")
+
+# Genotypic data----
+Geno.data = read.delim("00_Data/Mercy_data/HIST_CORR/filtered_genotype_data1.txt", sep ='\t',header = TRUE)
+Geno.data[1:5, 1:18]
+
+SNP_Binary_tbl <- Geno.data %>% 
+  separate(alleles, c("Major_Allele", NA), sep = "/", remove = F) %>% 
+  mutate(across(contains(c("BS39", "DH")), ~as.integer(.x == Major_Allele))) %>% 
+  select(-Major_Allele) 
+SNP_Binary_tbl[1:5, 1:18] 
+
+SNP_matrix <- SNP_Binary_tbl %>% 
+  column_to_rownames(var = "rs") %>% 
+  select(-c(alleles:QCcode)) %>% 
+  mutate_all(as.double) %>%
+  t()
+SNP_matrix[1:5, 1:18] 
+
+SNP_genotype_tbl <- SNP_matrix %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Lines")
+SNP_genotype_tbl[1:5, 1:18] 
+
+# Phenotypic data----
+### input data 
+AG_traits_path_tbl <- fs::dir_info("00_Data/Mercy_data/HIST_CORR")
+##
+AG_traits_info_tbl <- AG_traits_path_tbl %>% 
+  dplyr::select(path) %>%
+  filter(path %>% str_detect("DHHF")) %>% 
+  mutate(Traits = path %>% str_extract("(?<=CORR/).*?(?=_)")) %>% 
+  relocate(Traits) 
+
+##
+AG_traits_data_tbl <- AG_traits_info_tbl%>% 
+  # Read data
+  mutate(AG_rawdata = path %>% map(read.csv)) %>% 
+  mutate(AG_avereage_tbl = AG_rawdata %>% map(Avergor)) %>%
+  mutate(AG_pivot_tbl = AG_rawdata %>% map(pivot_trait_longer)) 
+
+
+Plants_tbl <- tibble(Y =list(c("Diploid", "Haploid", "Haploid_frailty")))
+
+Traits_data_tbl <- AG_traits_data_tbl %>% 
+  select(Traits, AG_rawdata) %>% 
+  mutate(AG_tbl = AG_rawdata %>% map(Feature_factor)) %>% 
+  add_column(Plants_tbl) %>% 
+  unnest(Y) %>% 
+  mutate(Formula = map(.x = Y, .f= ~formula(str_glue("{.x} ~  Rep + PI ")))) %>% 
+  mutate(Fit = map2(.x = AG_tbl, .y = Formula, .f = ~emmeans(lm(.y, data = .x ), ~ PI))) %>%
+  mutate(BLUEs = Fit %>% map(BLUE_tbl_generator_1)) %>% 
+  select(Traits, Y, BLUEs) %>% 
+  unnest(BLUEs) %>% 
+  pivot_wider(names_from = Y, values_from = emmean) %>% 
+  rename(Entry = PI) %>% 
+  nest(data = -Traits) 
+  
+#Genomic prediction----
+## Input
+
+Traits_training_data <- Traits_data_tbl %>% 
+  filter(Traits %in% c("PH", "EH", "FLL", "FLW", "TL", "SL", "TB")) %>% 
+  rename(Training_pheno = data) %>% 
+  mutate(Genotype = list(SNP_genotype_tbl)) %>% 
+  #mutate(Training_geno = map2(Training_pheno, Genotype, .f = Training_Geno)) %>% 
+  mutate(Training = map2(Training_pheno, Genotype, .f = Training_data))
+
+## Cross-validation-----
+rrBLUP_cv <- Traits_training_data %>% 
+  #filter(Traits %in% c("PH", "EH")) %>% 
+  #mutate(rrBLUP_cv = map2(Training_pheno, Training_geno, .f = GP_rrBLUP_cv, Repeat = 5, Fold = 5)) %>% 
+  mutate(rrBLUP_cv = map(Training, .f = GP_rrBLUP_cv, Repeat = 5, Fold = 5)) %>% 
+  dplyr::select(Traits, rrBLUP_cv)
+  
+
+Traits_training_data$Training_pheno[[1]] %>% dim()
+Traits_training_data$Training[[1]] %>% dim()
+
+rrBLUP_cv$rrBLUP_cv[[4]]
+
+save(rrBLUP_cv, file = "00_Data_out/GP_rrBLUP_results.RData")
+load("00_Data_out/GP_rrBLUP_results.RData")
+
+rrBLUP_cv_tbl <- rrBLUP_cv %>% 
+  mutate(Diploid = rrBLUP_cv %>% map(pluck(1)) %>% map(acc_summaryer)) %>%
+  mutate(Haploid = rrBLUP_cv %>% map(pluck(2)) %>% map(acc_summaryer)) %>% 
+  mutate(Frailty = rrBLUP_cv %>% map(pluck(3)) %>% map(acc_summaryer)) %>% 
+  select(-rrBLUP_cv) %>% 
+  unnest_wider(Diploid, names_sep = "_") %>% 
+  unnest_wider(Haploid, names_sep = "_") %>% 
+  unnest_wider(Frailty, names_sep = "_") %>% 
+  mutate(across(-Traits, round, 2))
+
+write.csv(rrBLUP_cv_tbl, "04_Table/GP_rrBLUP_results.csv", row.names = F)
+
+GP_results <- read.csv("04_Table/GP_rrBLUP_results.csv")
+  
+GP_summary_tbl <- GP_results %>% 
+  pivot_longer(-Traits, names_to = "Variable", values_to = "Value") %>% 
+  separate(Variable, c("Plants", "Stats"), extra = "merge", fill = "left") %>% 
+  separate(Stats, c(NA, "Stats")) %>% 
+  pivot_wider(names_from = "Stats", values_from = "Value") %>% 
+  mutate_at(vars(Plants), factor, levels=c("Diploid", "Haploid", "Frailty"))
+
+GP_mean_sd_tbl <- GP_summary_tbl %>% 
+  separate(Stats, c(NA, "Stats")) %>% 
+  pivot_wider(names_from = "Stats", values_from = "Value")
+
+p <- GP_summary_tbl %>% 
+  #filter(str_detect(Stats, "mean")) %>% 
+  #filter(!Plants == "Frailty") %>% 
+  ggplot(aes(Traits, mean, fill = Plants))+
+  geom_errorbar(#data = GP_mean_sd_tbl,
+    aes(x =Traits,
+        ymax = mean + sd/sqrt(5),
+        ymin = mean - sd/sqrt(5)), 
+    position = position_dodge(width=0.9), 
+    width = 0.1,
+    linewidth = 0.5)+
+  geom_bar(aes(fill = Plants),
+           stat = "identity",
+           color = "black",
+           position = position_dodge(width=0.9),
+           width = 0.5,
+           linewidth = 0.5 )+
+  labs(y="Predictive ability")
+
+p  
+ggsave("02_Figures/GP_barplot.jpeg",width = 25, height = 15, units = "cm", dpi = 320)
+
+#####################################################Table 1. Summary statistics#############################################################################
+
+# Install dplyr if not already installed
+if (!require(dplyr)) {
+  install.packages("dplyr")
+}
+
+# Install magrittr if not already installed for the pipe operator
+if (!require(magrittr)) {
+  install.packages("magrittr")
+}
+
+# Load the libraries
+library(dplyr)
+library(magrittr)
+
+#setwd
+data <- read.csv("./PH.csv")#####Repeat the process for all the other seven traits(EH,SD,FLL,FLW,SL,TL,TB)
+
+# Calculate descriptive statistics and 95% confidence intervals using dplyr
+desc_stats <- data %>%
+  summarise(
+    Mean_Diploid = mean(Diploid, na.rm = TRUE),
+    SD_Diploid = sd(Diploid, na.rm = TRUE),
+    Min_Diploid = min(Diploid, na.rm = TRUE),
+    Max_Diploid = max(Diploid, na.rm = TRUE),
+    SE_Diploid = sd(Diploid, na.rm = TRUE) / sqrt(n()),
+    CI_Lower_Diploid = mean(Diploid, na.rm = TRUE) - qt(0.975, df = n() - 1) * SE_Diploid,
+    CI_Upper_Diploid = mean(Diploid, na.rm = TRUE) + qt(0.975, df = n() - 1) * SE_Diploid,
+    
+    Mean_Haploid = mean(Haploid, na.rm = TRUE),
+    SD_Haploid = sd(Haploid, na.rm = TRUE),
+    Min_Haploid = min(Haploid, na.rm = TRUE),
+    Max_Haploid = max(Haploid, na.rm = TRUE),
+    SE_Haploid = sd(Haploid, na.rm = TRUE) / sqrt(n()),
+    CI_Lower_Haploid = mean(Haploid, na.rm = TRUE) - qt(0.975, df = n() - 1) * SE_Haploid,
+    CI_Upper_Haploid = mean(Haploid, na.rm = TRUE) + qt(0.975, df = n() - 1) * SE_Haploid,
+    
+    Mean_Haploid_Frailty = mean(`Haploid_frailty`, na.rm = TRUE),
+    SD_Haploid_Frailty = sd(`Haploid_frailty`, na.rm = TRUE),
+    Min_Haploid_Frailty = min(`Haploid_frailty`, na.rm = TRUE),
+    Max_Haploid_Frailty = max(`Haploid_frailty`, na.rm = TRUE),
+    SE_Haploid_Frailty = sd(`Haploid_frailty`, na.rm = TRUE) / sqrt(n()),
+    CI_Lower_Haploid_Frailty = mean(`Haploid_frailty`, na.rm = TRUE) - qt(0.975, df = n() - 1) * SE_Haploid_Frailty,
+    CI_Upper_Haploid_Frailty = mean(`Haploid_frailty`, na.rm = TRUE) + qt(0.975, df = n() - 1) * SE_Haploid_Frailty
+  ) %>% 
+  as.list()  # Convert the output to a list
+
+# Print the list of descriptive statistics
+print(desc_stats)
+
+#######################################################Table 1: Entry-mean heritabilities########################################################################
+
+
+# Function to calculate group-wise means for selected columns
+Avergor <- function(tbl, Genotype = PI, col = c("Diploid", "Haploid", "Haploid_frailty")) {
+  
+  # Group the data by the specified column (Genotype) and summarize the selected columns
+  out <- tbl %>% 
+    group_by({{Genotype}}) %>%  # Dynamically group data by the specified Genotype column using tidy evaluation
+    summarise(across({{col}}, mean, na.rm = TRUE))  # Apply the mean function to each column in 'col', ignoring NA values
+  
+  return(out)  # Return the resulting summarized table
+}
+
+
+# Function to convert specific columns to factors
+Feature_factor <- function(tbl) {
+  
+  out <- tbl %>% 
+    mutate_at(vars(PI, Rep), as.factor)  # Convert the 'PI' and 'Rep' columns to factors
+  
+  return(out)  # Return the modified table
+}
+
+
+# Function to generate a simplified table with specific columns
+BLUE_tbl_generator_1 <- function(tbl) {
+  
+  out <- tbl %>% 
+    as.data.frame() %>%  # Convert the input table to a data frame (if it’s not already)
+    dplyr::select(PI, emmean)  # Select only the 'PI' and 'emmean' columns
+  
+  return(out)  # Return the resulting table
+}
+
+
+# Function to generate a variance components table with additional calculations
+VG_tbl_generator <- function(Object) {
+  
+  tbl <- summary(Object)$varcor %>%  # Extract variance components from the input object
+    as.data.frame() %>% 
+    dplyr::select(!c(var1, var2)) %>%  # Drop 'var1' and 'var2' columns
+    mutate(
+      TV = sum(vcov),  # Total variance (sum of variance components)
+      H2 = vcov / TV   # Heritability (proportion of variance explained by each component)
+    )
+  
+  return(tbl)  # Return the resulting table
+}
+
+# Function to generate a detailed variance components table with heritability calculations
+VG_tbl_generator_1 <- function(Object, Entry = PI, Rep = 2) {
+  
+  tbl <- summary(Object)$varcor %>% 
+    as.data.frame() %>% 
+    dplyr::select(!c(var1, var2, sdcor)) %>%  # Drop unnecessary columns
+    pivot_wider(names_from = grp, values_from = vcov) %>%  # Reshape data: group-wise variance components as columns
+    mutate_at(vars(-{{Entry}}), ~ . / {{Rep}}) %>%  # Scale all columns except the 'Entry' column by 'Rep'
+    mutate(Entry_h2 = {{Entry}} / ({{Entry}} + Rep + Residual))  # Calculate heritability for 'Entry'
+  
+  return(tbl)  # Return the resulting table
+}
+
+###############################################Supplemental Figure 1. Minimum haploid frailty across traits##########################################################
+# Load the library
+library(ggplot2)
+
+# Example data (replace this with your actual data)
+data <- data.frame(
+  Trait = c("PH", "SL", "TL", "SD", "EH", "FLL", "TB", "FLW"),
+  HF = c(0, -10, -20, -30, -40, -50, -60, -70)  # Minimun Haploid Frailty% as shown in Table 1
+)
+
+# Create the bar plot
+ggplot(data, aes(x = HF, y = Trait, fill = HF)) +
+  geom_bar(stat = "identity") +  # Bar plot based on values
+  scale_fill_gradient2(low = "red", mid = "purple", high = "blue", midpoint = 0) +  # Color gradient
+  theme_minimal() +  # Use a clean theme
+  labs(
+    x = "Haploid frailty %",
+    y = "Trait",
+    fill = "HF"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 12, face = "bold"),  # Customize y-axis labels
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10)
+  )
+
+#############################################################Supplemental Figure 2. Haploid frailty heritabilities#############################################
+
+# Load the necessary library
+library(ggplot2)
+
+#Data
+data <- data.frame(
+  Trait = c("PH", "EH", "SL", "TL", "FLL", "FLW", "TB", "SD"),
+  Heritability = c(0.65, 0.6, 0.55, 0.4, 0.35, 0.25, 0.15, 0.1)  # Haploid frailty heritability estimates as shown in Table 1.
+)
+
+# Create the bar plot
+ggplot(data, aes(x = Heritability, y = Trait, fill = Heritability)) +
+  geom_bar(stat = "identity") +  # Horizontal bar plot
+  scale_fill_gradient(low = "lightblue", high = "purple") +  # Gradient from light blue to purple
+  theme_minimal() +  # Use a clean theme
+  labs(
+    x = "Haploid frailty heritability estimates",
+    y = "Trait",
+    fill = "Heritability"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 12, face = "bold"),  # Customize y-axis labels
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10)
+  )
+
+###############################################Table 3. Correlations between diploid and haploid, diploid and haploid frailty and haploid and haploid frailty#############
+
+#The following is a code for plant height. This code was repeated for all the other traits.
+# Read in SD_%HF data
+data <- read.csv("./PH.csv")
+
+# Calculate Spearman's correlations and p-values
+cor_haploid_frailty <- cor.test(data$Haploid, data$Haploid_frailty, method = "spearman", exact = FALSE)
+cor_haploid_diploid <- cor.test(data$Haploid, data$Diploid, method = "spearman", exact = FALSE)
+cor_diploid_frailty <- cor.test(data$Diploid, data$Haploid_frailty, method = "spearman", exact = FALSE)
+
+# Print the results
+cat("Spearman correlation and p-value between Haploid and Haploid Frailty:\n")
+cat("  Correlation:", round(cor_haploid_frailty$estimate, 2), "\n")
+cat("  P-value:", cor_haploid_frailty$p.value, "\n\n")
+
+cat("Spearman correlation and p-value between Haploid and Diploid:\n")
+cat("  Correlation:", round(cor_haploid_diploid$estimate, 2), "\n")
+cat("  P-value:", cor_haploid_diploid$p.value, "\n\n")
+
+cat("Spearman correlation and p-value between Diploid and Haploid Frailty:\n")
+cat("  Correlation:", round(cor_diploid_frailty$estimate, 2), "\n")
+cat("  P-value:", cor_diploid_frailty$p.value, "\n")
+
+#################################Supplemental Figure 3. Visualization of correlation shown in Table 3#######################################################
+# Load necessary libraries
+library(ggplot2)
+library(tidyr)
+
+# Example data
+data <- data.frame(
+  Trait = c("Tassel length", "Tassel branches", "Spike length", "Plant height",
+            "Flag leaf width", "Flag leaf length", "Ear height"),
+  `Diploid_Haploid` = c(0.5, 0.7, 0.8, 0.9, 0.7, 0.7, 0.8),
+  `Diploid_HF_Percentage` = c(0.4, NA, 0.1, 0.2, NA, NA, 0.1),
+  `Haploid_HF_Percentage` = c(-0.3, NA, -0.6, -0.5, NA, NA, -0.6)
+)
+
+# Reshape data to long format for ggplot2
+data_long <- pivot_longer(data, cols = -Trait, 
+                          names_to = "Correlation_Type", 
+                          values_to = "Correlation")
+
+# Create the plot with a gray background
+ggplot(data_long, aes(x = Trait, y = Correlation, fill = Correlation_Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7, na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("Diploid_Haploid" = "purple", 
+               "Diploid_HF_Percentage" = "orange", 
+               "Haploid_HF_Percentage" = "green"),
+    labels = c("Diploid vs Haploid", "Diploid vs HF%", "Haploid vs HF%")
+  ) +
+  theme_minimal() +
+  labs(
+    x = "Trait",
+    y = "Correlation Coefficient",
+    fill = "Correlation Type",
+    title = "Correlation Coefficients for Traits",
+    subtitle = "Grouped by Correlation Types"
+  ) +
+  theme(
+    plot.background = element_rect(fill = "gray90", color = NA),  # Light gray plot background
+    panel.background = element_rect(fill = "gray95", color = NA),  # Slightly darker panel background
+    panel.grid.major = element_line(color = "gray80"),  # Subtle gray gridlines
+    axis.text.x = element_text(size = 12, angle = 90, hjust = 1, face = "bold"),  # Rotate x-axis labels
+    axis.text.y = element_text(size = 12),  # Customize y-axis labels
+    axis.title = element_text(size = 14, face = "bold"),  # Bold axis titles
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray50"),  # Center and gray subtitle
+    legend.title = element_text(size = 12, face = "bold"),  # Bold legend title
+    legend.text = element_text(size = 10),  # Adjust legend text size
+    legend.position = "top",  # Place legend at the top
+    legend.key.size = unit(0.8, "cm")  # Adjust legend key size
+  )
+
+
+######################################################################GWAS Table 4 and supplemental figure 4)#############################################
+
+
+library(lme4)
+library(ggResidpanel)
+library(dplyr)
+library(ggplot2)
+library(emmeans)
+library(arm)
+library(tidyverse)
+library("car")
+library(qqman)
+#install.packages("bestNormalize")
+install.packages ("qqman")
+library(bestNormalize)
+#install.packages("CMplot")
+library(CMplot)
+
+##############The following is a GWAS code for only the tassel branches (TB) trait and stacked Manhattan plots. This process was repeated for all the traits################
+setwd("C:/Users/mfakude/OneDrive - Iowa State University/Desktop/HIST_CORR/TB_DIP")
+
+#Read in data
+
+data1 <- read.csv("./TB_DHHF.csv")
+data1$PI = as.factor(data1$PI)
+data1$Rep = as.factor(data1$Rep)
+data1$Haploid_frailty = as.numeric(data1$Haploid_frailty)
+
+#HISTOGRAMS
+hist(data1$Haploid_frailty)
+hist(data1$Haploid_frailty, col = "Cyan", xlab = "Tassel branches_Haploid_frailty", main = "Trait distribution")
+Boxplot(data1$Haploid_frailty, col = "Cyan", ylab = "Tassel branches_Haploid_frailty", main = "Tassel branches_Haploid_frailty")
+
+
+# P-Value less than 0.05, violates assumption can be seen with hist above
+shapiro.test(data1$Haploid_frailty) 
+
+
+# the code below will find a transformation that works for the data
+bestNormalize::bestNormalize(data1$Haploid_frailty) # read its output
+tmp <- bestNormalize::bestNormalize(data1$Haploid_frailty)
+shapiro.test(tmp$chosen_transform$x.t) # best transformation
+data1$transformed_data <- tmp$chosen_transform$x.t # adding transformed data
+hist(data1$transformed_data) # better?
+hist(data1$transformed_data, col = "Cyan", xlab = "Tassel branches_Haploid_frailty", main = "Trait distribution")
+
+
+# the ANOVA model 
+str(data1)
+table(data1$PI, data1$Rep)
+data1|>subset(PI=='BS39_DH_009') 
+model <- lm(transformed_data~Rep+PI, data = data1) 
+ggResidpanel::resid_panel(model)
+anova(model) 
+blues <- data.frame(emmeans::emmeans(model,'PI')) # getting empirical BLUES (least squares estimates)
+
+#Load genotypic file
+
+## Run GWAS   
+Geno.data = read.delim("00_Data/Mercy_data/HIST_CORR/filtered_genotype_data1.txt", sep ='\t',header = FALSE)
+library(GAPIT)
+myGAPIT <- GAPIT(
+  Y=DHHF_Traits_emmeans_tbl,
+  G=Geno.data,
+  model=c("MLM","FarmCPU","Blink"),
+  SNP.MAF=0.01,
+  PCA.total=3,
+  Multiple_analysis=TRUE,
+  file.output=T)
+
+GWAS_path_tbl <- fs::dir_info("03_GWAS_outputs/")
+##
+GWAS_info_tbl <- GWAS_path_tbl %>% 
+  dplyr::select(path) %>%
+  filter(path %>% str_detect("GWAS_Results")) %>% 
+  mutate(Traits = path %>% str_extract("(?<=Results.).*?(?=.csv)")) %>%
+  relocate(Traits) %>%
+  separate(Traits, c("Models", "Traits"), sep = "[.]") %>% 
+  #separate(Traits, c("Plants", "Traits"), sep = "_") %>% 
+  relocate(Traits) #%>% 
+  #arrange(Traits)
+
+#GWAS_data_tbl <- GWAS_info_tbl%>% 
+  # Read data
+#  mutate(GWAS_result = path %>% map(read.csv))  
+
+#GWAS_data_tbl$GWAS_result[[1]] %>% dim()
+
+GWAS_PH_data_tbl <- GWAS_info_tbl%>% 
+  filter(str_detect(Traits, "PH")) %>% 
+  # Read data
+  mutate(GWAS_result = path %>% map(read.csv))
+
+GWAS_FarmCPU_PH_data_tbl <- GWAS_PH_data_tbl %>% 
+  filter(str_detect(Models, "FarmCPU")) %>% 
+  select(Traits, GWAS_result) %>% 
+  unnest(cols = c(GWAS_result)) %>% 
+  select(c(1:5)) %>% 
+  pivot_wider(names_from = "Traits", values_from = "P.value") %>% 
+  rename(Chromosome = Chr, Position = Pos)
+
+colnames(GWAS_FarmCPU_PH_data_tbl) 
+Threshold <- 0.00001394
+SNPs <-GWAS_FarmCPU_PH_data_tbl %>% 
+  filter(Diploid_PH < Threshold | 
+         Haploid_PH < Threshold |
+        Haploid_frailty_PH < Threshold) %>% 
+  select(SNP) %>% 
+  pull()
+
+CMplot(GWAS_FarmCPU_PH_data_tbl,type="p",plot.type="m",LOG10=TRUE,highlight=SNPs,highlight.text=SNPs, highlight.type="l",
+         threshold=Threshold,threshold.col="black",threshold.lty=1,col=c("grey60","#4197d8"),
+         signal.cex=1.2, signal.col="red", highlight.col="grey",highlight.cex=0.7,
+         file="jpg",dpi=300,file.output=TRUE,verbose=TRUE,multracks=TRUE)
+
+GWAS_Traits <- GWAS_info_tbl %>% 
+  select(Traits) %>% 
+  separate(Traits, c(NA, "Traits"), sep = "_") %>% 
+  distinct(Traits) %>% 
+  pull(Traits)
+GWAS_Traits
+
+source("01_Scripts/GWAS_plots_functions.R")
+GWAS_info_tbl %>% 
+  Manhantanplotor(trait = GWAS_Traits[4], model = "FarmCPU")
+
+for(i in 1:8){
+  GWAS_info_tbl %>% 
+    Manhantanplotor(trait = GWAS_Traits[i], model = "FarmCPU")
+}
+
+
+

@@ -12,7 +12,7 @@ SL = Spike length
 TB = Number of tassel branches; 
 TL = Tassel length
 
-Each excel sheet contains 3 columnsas follows: 
+Each excel sheet contains 3 columns as follows: 
 1. Haploid performance
 2. Diploid performance 
 3. Haploid Frailty percentages
